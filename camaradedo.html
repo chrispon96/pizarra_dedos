@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dibujar sobre cámara (DroidCam)</title>
+  <style>
+    :root{--ui-h:48px}
+    html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Arial}
+    .app{display:flex;flex-direction:column;height:100vh;background:#111;color:#fff}
+    header{height:var(--ui-h);display:flex;align-items:center;gap:8px;padding:6px 10px;background:linear-gradient(90deg,#222,#161616)}
+    header input, header button, header select{height:34px}
+    .stage{position:relative;flex:1;display:flex;align-items:center;justify-content:center;background:#000}
+    video{max-width:100%;max-height:100%;width:auto;height:auto;background:#000}
+    canvas.drawing{position:absolute;touch-action:none}
+    .controls{display:flex;gap:8px;align-items:center}
+    .tips{font-size:13px;opacity:.8}
+    .bottom{display:flex;gap:8px;padding:8px;background:#0f0f0f}
+    .btn{padding:6px 10px;border-radius:6px;border:1px solid #333;background:#222;color:#fff;cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="controls">
+        <label class="tips">Fuente:</label>
+        <select id="sourceSelect">
+          <option value="getUserMedia">Cámara (getUserMedia)</option>
+          <option value="url">URL (DroidCam IP / MJPEG)</option>
+        </select>
+        <input id="urlInput" placeholder="http://192.168.x.x:4747/video" style="width:260px;display:none" />
+        <button id="startBtn" class="btn">Iniciar</button>
+        <button id="stopBtn" class="btn">Detener</button>
+      </div>
+      <div style="flex:1"></div>
+      <div class="controls">
+        <label class="tips">Color</label>
+        <input type="color" id="colorPicker" value="#ff2d55" />
+        <label class="tips">Tamaño</label>
+        <input id="sizeRange" type="range" min="1" max="60" value="6" />
+      </div>
+    </header>
+
+    <div class="stage" id="stage">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="drawCanvas" class="drawing"></canvas>
+    </div>
+
+    <div class="bottom">
+      <button id="undoBtn" class="btn">Deshacer</button>
+      <button id="clearBtn" class="btn">Limpiar</button>
+      <button id="saveBtn" class="btn">Descargar (imagen combinada)</button>
+      <div style="flex:1"></div>
+      <div class="tips">Consejo: si usas DroidCam en modo IP, pega la URL MJPEG (ej: http://192.168.1.5:4747/video) y selecciona "URL" antes de Iniciar.</div>
+    </div>
+  </div>
+
+<script>
+(async function(){
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('drawCanvas');
+  const ctx = canvas.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const sourceSelect = document.getElementById('sourceSelect');
+  const urlInput = document.getElementById('urlInput');
+  const colorPicker = document.getElementById('colorPicker');
+  const sizeRange = document.getElementById('sizeRange');
+  const clearBtn = document.getElementById('clearBtn');
+  const undoBtn = document.getElementById('undoBtn');
+  const saveBtn = document.getElementById('saveBtn');
+
+  let stream = null;
+  let drawing = false;
+  let last = null;
+  let pointerId = null;
+  const history = [];
+  const MAX_HISTORY = 20;
+
+  function setCanvasSize(){
+    const rect = video.getBoundingClientRect();
+    canvas.width = Math.round(rect.width);
+    canvas.height = Math.round(rect.height);
+    canvas.style.left = rect.left + 'px';
+    canvas.style.top = rect.top + 'px';
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+  }
+
+  function pushHistory(){
+    if(history.length >= MAX_HISTORY) history.shift();
+    history.push(ctx.getImageData(0,0,canvas.width,canvas.height));
+  }
+
+  function restoreHistory(){
+    const img = history.pop();
+    if(!img) return;
+    ctx.putImageData(img,0,0);
+  }
+
+  function clearCanvas(){
+    pushHistory();
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+  }
+
+  function getPointerPos(e){
+    const rect = canvas.getBoundingClientRect();
+    return {x: (e.clientX - rect.left) * (canvas.width/rect.width), y: (e.clientY - rect.top) * (canvas.height/rect.height)};
+  }
+
+  canvas.addEventListener('pointerdown',(e)=>{
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    pointerId = e.pointerId;
+    drawing = true;
+    last = getPointerPos(e);
+    pushHistory();
+  });
+  canvas.addEventListener('pointermove',(e)=>{
+    if(!drawing || e.pointerId !== pointerId) return;
+    const p = getPointerPos(e);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = colorPicker.value;
+    ctx.lineWidth = sizeRange.value;
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    last = p;
+  });
+  canvas.addEventListener('pointerup',(e)=>{
+    if(e.pointerId !== pointerId) return;
+    drawing = false;
+    canvas.releasePointerCapture(e.pointerId);
+    pointerId = null;
+  });
+  canvas.addEventListener('pointercancel',()=>{ drawing=false; pointerId=null; });
+
+  // Buttons
+  clearBtn.addEventListener('click',()=>{ clearCanvas(); });
+  undoBtn.addEventListener('click',()=>{ restoreHistory(); });
+
+  saveBtn.addEventListener('click',()=>{
+    // create an offscreen canvas at video dimensions
+    const w = video.videoWidth || canvas.width;
+    const h = video.videoHeight || canvas.height;
+    const off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    const octx = off.getContext('2d');
+    // draw video frame (try to respect aspect ratio)
+    octx.drawImage(video,0,0,w,h);
+    // draw drawing canvas scaled to video resolution
+    octx.drawImage(canvas,0,0,w,h);
+    const data = off.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = data; a.download = 'foto_dibujo.png';
+    a.click();
+  });
+
+  // Start / stop controls
+  startBtn.addEventListener('click',async()=>{
+    if(sourceSelect.value === 'getUserMedia'){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+        video.srcObject = stream;
+      }catch(err){
+        alert('Error accediendo a la cámara: '+err.message);
+      }
+    }else{
+      const url = urlInput.value.trim();
+      if(!url){ alert('Pega la URL MJPEG de DroidCam (ej: http://192.168.1.5:4747/video)'); return; }
+      // Use the URL as video src (works for MJPEG or direct streams)
+      video.srcObject = null;
+      video.src = url;
+      video.crossOrigin = 'anonymous';
+      try{ await video.play(); }catch(e){ console.warn(e); }
+    }
+  });
+
+  stopBtn.addEventListener('click',()=>{
+    if(stream){
+      stream.getTracks().forEach(t=>t.stop());
+      stream = null;
+    }
+    video.pause();
+    video.srcObject = null;
+    video.removeAttribute('src');
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+  });
+
+  sourceSelect.addEventListener('change',()=>{
+    urlInput.style.display = sourceSelect.value === 'url' ? 'inline-block' : 'none';
+  });
+
+  // when video metadata available, size the overlay canvas
+  video.addEventListener('loadedmetadata',()=>{
+    // Fit canvas to visible video size in page
+    // small timeout to let layout settle
+    setTimeout(()=>{
+      const rect = video.getBoundingClientRect();
+      canvas.style.position = 'absolute';
+      canvas.style.left = rect.left + 'px';
+      canvas.style.top = rect.top + 'px';
+      canvas.width = Math.round(rect.width);
+      canvas.height = Math.round(rect.height);
+      canvas.style.width = rect.width + 'px';
+      canvas.style.height = rect.height + 'px';
+      // scale drawing context to be crisp on high-DPI
+      const dpr = window.devicePixelRatio || 1;
+      if(dpr !== 1){
+        const w = canvas.width, h = canvas.height;
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        ctx.scale(dpr,dpr);
+      }
+    },50);
+  });
+
+  // also update on resize / orientation
+  window.addEventListener('resize',()=>{
+    if(video.readyState >= 1) setTimeout(setCanvasSize,80);
+  });
+
+  // Helpful hint: if running from file:// some browsers block camera. Use http(s) or localhost.
+
+})();
+</script>
+</body>
+</html>
